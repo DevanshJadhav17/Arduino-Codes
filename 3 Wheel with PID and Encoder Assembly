@@ -1,0 +1,261 @@
+#include <Wire.h>
+#include <math.h>
+#include <Adafruit_BNO055.h>
+#include <Adafruit_Sensor.h>
+#include <Encoder.h>
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55);
+Encoder EncX(14, 15);
+Encoder EncY(27, 26);
+
+// Variables for motor control
+float v1, v2, v3, v4;
+int W = 0;
+float Kp = 1.4, kd = 180, ki = 0.00050;  // tuned values with no load Kp = 0.7, kd = 80;
+float r = 1;
+int8_t Vx, Vy;
+float Vgx, Vgy;
+byte L2, R2;
+float bnox, current_angle, new_angle, error, dt, integral, P, D, I, PD, vel, vel_constant = 0.7;
+int new_time, old_time;
+float old_error, new_error, change_error, prev_error, theta, x, y, z;
+int prev_bnoFlag, bnoFlag;
+long  newPositionX , newPositionY;
+float radius = 2.8, pi = 3.14159, ticks = 8192.0, DisX = 0, DisY = 0;
+float ticksToCM = (2*pi*(radius/ticks));
+
+
+
+// Motor PWM pins defined in arrays
+const int Lpwm[] = { 2, 3, 6, 7 };
+const int Rpwm[] = { 1, 4, 5, 8 };
+
+void setup() {
+  Wire2.begin();         // Start I2C communication
+  Serial.begin(115200);  // Initialize Serial communication
+  Serial7.begin(115200);
+  // Set motor pins as outputs using a loop
+  for (int i = 0; i < 4; i++) {
+    pinMode(Lpwm[i], OUTPUT);
+    pinMode(Rpwm[i], OUTPUT);
+  }
+  while (!bno.begin()) {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    delay(100);
+  }
+  bno.setExtCrystalUse(true);
+  new_time = millis();
+}
+
+void readencoder() {
+
+  newPositionX = EncX.read();
+  newPositionY = EncY.read();
+
+  // Serial.print(newPositionX);
+  // Serial.print("   ");
+  // Serial.println(newPositionY);
+}
+
+void sendEncoderDataUART(){
+  // Start Byte
+  Serial7.write(0xAA);
+  // Send 4 bytes for X position
+  Serial7.write((byte *)&newPositionX, sizeof(newPositionX));
+  // Send 4 bytes for Y position
+  Serial7.write((byte *)&newPositionY, sizeof(newPositionY));
+
+}
+
+// Function to calculate wheel velocities
+void equations() {
+  W = R2 - L2;
+  W = map(W, -255, 255, -50, 50);
+
+  v1 = Vx + W + PD;
+  v2 = -((0.5 * Vx) + (0.86602 * Vy)) + W + PD;
+  v3 = (-0.5 * Vx) + (0.86602 * Vy) + W + PD;
+  v4 = 0;
+}
+
+// Function to calculate wheel velocities for global coordinates
+// void global_equations() {
+//   W = R2 - L2;
+//   W = map(W, -255, 255, -50, 50);
+
+//   theta = radians(bnox);
+//   v1 = vel_constant * (Vx * cos(theta) + Vy * sin(theta)) + W + PD;
+//   v2 = vel_constant * -((0.5 * Vx * (cos(theta) - 1.73 * sin(theta))) + (0.5 * Vy * (1.73 * cos(theta) + 0.5 * sin(theta)))) + W + PD;
+//   v3 = vel_constant * ((0.5 * Vx * (-cos(theta) - 1.73 * sin(theta))) + (0.5 * Vy * (1.73 * cos(theta) - 0.5 * sin(theta)))) + W + PD;
+//   v4 = 0;
+// }
+
+void global_equations(){
+  W = R2 - L2;
+  W = map(W, -255, 255, -50, 50);
+  theta = radians(bnox);
+  Vgx=(cos(theta) * Vx )- (sin(theta)*Vy);
+  Vgy=(sin(theta)*Vx) + (cos(theta)*Vy);
+
+  v1 = Vgx + W + PD;
+  v2 = -((0.5 * Vgx) + (0.86602 * Vgy)) + W + PD;
+  v3 = ((-0.5 * Vgx) + (0.86602 * Vgy)) + W + PD;
+  v4 = 0;
+
+}
+
+// Function to control motors using a loop
+void controlMotors() {
+  float speeds[] = { v1, v2, v3, v4 };  // Array of motor speeds
+
+  for (int i = 0; i < 4; i++) {
+    if (speeds[i] > 0) {
+      analogWrite(Lpwm[i], constrain(speeds[i], 0, 100));
+      analogWrite(Rpwm[i], 0);
+    } else {
+      float speed = abs(speeds[i]);
+      analogWrite(Rpwm[i], constrain(speed, 0, 100));
+      analogWrite(Lpwm[i], 0);
+    }
+  }
+}
+
+// Function to read bno values
+void readbno() {
+  imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+  bnox = euler.x();
+  // Convert angles into 2 quadrants (i.e. 0-180 and 0-(-180))
+  if (bnox > 180) {
+    bnox = bnox - 360;
+  }
+  // Serial.print("bnoX: ");
+  // Serial.print(bnox);
+}
+
+void pid() {
+  if (W) {
+    new_angle = bnox;      //deviated angle
+    current_angle = bnox;  //target angle
+  } else {
+    new_angle = bnox;
+  }
+
+  error = new_angle - current_angle;
+  if (error > 180) {
+    error = error - 360;
+  } else if (error < -180) {
+    error = error + 360;
+  }
+
+
+
+  P = Kp * -error;
+
+
+  old_time = new_time;
+  new_time = millis();
+
+  dt = new_time - old_time;
+  change_error = old_error - error;
+  old_error = error;
+
+  D = kd * change_error / dt;
+
+  integral += -error * dt;
+  I = ki * integral;
+  
+  if(abs(error)<1){
+    PD=0;
+    P=0;
+    D=0;
+    I=0;
+  }
+
+  PD = P + D + I;
+  PD = constrain(PD, -100, 100);
+}
+
+void loop() {
+  // Request 4 bytes from I2C device at address 8
+  Wire2.requestFrom(8, 4);
+
+  // Read values from I2C
+  if (Wire2.available() == 4) {
+    Vx = Wire2.read();
+    Vy = Wire2.read();
+    L2 = Wire2.read();
+    R2 = Wire2.read();
+  } else {
+    // Handle missing or incomplete data
+    Vx = 0;
+    Vy = 0;
+    L2 = 0;
+    R2 = 0;
+  }
+
+
+  // Read bno values
+  readbno();
+
+  //Apply pid
+  pid();
+
+  // Calculate wheel velocities
+  equations();
+
+  // Calculate wheel velocities for global coordinates
+  // global_equations();
+
+  // Constrain velocities to avoid high PWM values
+  v1 = constrain(v1, -100, 100);
+  v2 = constrain(v2, -100, 100);
+  v3 = constrain(v3, -100, 100);
+  v4 = constrain(v4, -100, 100);
+
+  // Control motors
+  controlMotors();
+
+  // Debugging output
+  // Serial.print(", v1: ");
+  // Serial.print(v1);
+  // Serial.print(", v2: ");
+  // Serial.print(v2);
+  // Serial.print(", v3: ");
+  // Serial.print(v3);
+  // Serial.print(", v4: ");
+  // Serial.print(v4);
+  // Serial.print("  W :");
+  // Serial.print(W);
+  // Serial.print("  P :");
+  // Serial.print(P);
+  // Serial.print("  D :");
+  // Serial.print(D);
+  // Serial.print("  I :");
+  // Serial.print(I);
+  // Serial.print("  NewA :");
+  // Serial.print(new_angle);
+  // Serial.print("  CurrA :");
+  // Serial.print(current_angle);
+  // Serial.print("  Error :");
+  // Serial.println(error);
+
+  readencoder();
+
+  // DisX = newPositionX * ticksToCM;
+  // DisY = newPositionY * ticksToCM;
+
+
+  // Serial.print(newPositionX);
+  // Serial.print("   ");
+  // Serial.print(DisX);
+  // Serial.print("   ");
+  // Serial.print(newPositionY);
+  // Serial.print("   ");
+  // Serial.println(DisY);
+
+
+  sendEncoderDataUART();
+
+  delay(10);  // Small delay for smoother control
+}
