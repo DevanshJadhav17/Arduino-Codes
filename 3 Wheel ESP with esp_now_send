@@ -1,0 +1,146 @@
+#include <PS4Controller.h>
+#include <Wire.h>
+#include "ESP32_NOW.h"
+#include "WiFi.h"
+#include <esp_mac.h>
+
+#define ESPNOW_WIFI_CHANNEL 6
+
+int32_t newPositionX = 0;
+int32_t newPositionY = 0;
+int8_t leftx;
+int8_t lefty;
+byte L2;
+byte R2;
+long encoData [2] = {0};
+
+class ESP_NOW_Broadcast_Peer : public ESP_NOW_Peer {
+public:
+  // Constructor of the class using the broadcast address
+  ESP_NOW_Broadcast_Peer(uint8_t channel, wifi_interface_t iface, const uint8_t *lmk) : ESP_NOW_Peer(ESP_NOW.BROADCAST_ADDR, channel, iface, lmk) {}
+
+  // Destructor of the class
+  ~ESP_NOW_Broadcast_Peer() {
+    remove();
+  }
+
+  // Function to properly initialize the ESP-NOW and register the broadcast peer
+  bool begin() {
+    if (!ESP_NOW.begin() || !add()) {
+      log_e("Failed to initialize ESP-NOW or register the broadcast peer");
+      return false;
+    }
+    return true;
+  }
+
+  // Function to send a message to all devices within the network
+  bool send_message(const uint8_t *data, size_t len) {
+    if (!send(data, len)) {
+      log_e("Failed to broadcast message");
+      return false;
+    }
+    return true;
+  }
+};
+
+ESP_NOW_Broadcast_Peer broadcast_peer(ESPNOW_WIFI_CHANNEL, WIFI_IF_STA, NULL);
+
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);
+  Wire.begin(8);
+  PS4.begin();
+  PS4.attach(data);
+  Wire.onRequest(requestEvent);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setChannel(ESPNOW_WIFI_CHANNEL);
+  while (!WiFi.STA.started()) {
+    delay(100);
+  }
+
+  if (!broadcast_peer.begin()) {
+    Serial.println("Failed to initialize broadcast peer");
+    Serial.println("Reebooting in 5 seconds...");
+    delay(5000);
+    ESP.restart();
+  }
+
+  Serial.println("Setup complete. Broadcasting messages every 5 seconds.");
+}
+
+void requestEvent() {
+  Wire.write(leftx);
+  Wire.write(lefty);
+  Wire.write(L2);
+  Wire.write(R2);
+}
+void data() {
+
+  leftx = PS4.LStickX();
+  lefty = PS4.LStickY();
+  L2 = PS4.L2Value();
+  R2 = PS4.R2Value();
+
+  // Serial.print(String("LeftX: ") + PS4.LStickX() + String("  LeftY: ") + PS4.LStickY());
+  // Serial.println(String(" L2: ") + PS4.L2Value() + String("  R2: ") +PS4.R2Value());
+
+  if (leftx >= -7 && leftx <= 7) {
+    leftx = 0;
+  }
+  if (lefty >= -7 && lefty <= 7) {
+    lefty = 0;
+  }
+
+
+  // Serial.print(String("N_LeftX: ") + leftx + String("  N_LeftY: ") + lefty);
+  // Serial.println(String(" N_L2: ") + L2 + String("  N_R2: ") + R2);
+
+  // Serial.print(leftx);
+  // // Serial.println(String(leftx));
+  // // Serial.print("   ");
+  // Serial.print(String("  ") + lefty);
+  // // Serial.print(lefty);
+
+  // // Serial.print("   ");
+  // Serial.print(String("  ") + L2);
+  // // Serial.print(L2);
+  // // Serial.print("   ");
+  // Serial.println(String("  ") + R2);
+  // Serial.print(R2);
+  // Serial.println("  ");
+}
+
+
+
+void loop() {
+   if (Serial2.available() >= 4) {  // Wait for start byte + 8 data bytes
+    if (Serial2.read() == 0xAA) {  // Look for header
+      byte xBytes[4], yBytes[4];
+
+      Serial2.readBytes(xBytes, 4);
+      Serial2.readBytes(yBytes, 4);
+
+      memcpy(&newPositionX, xBytes, 4);
+      memcpy(&newPositionY, yBytes, 4);
+
+      Serial.print("X: "); 
+      Serial.print(newPositionX);
+      Serial.print("  Y: "); 
+      Serial.println(newPositionY);
+    }
+  }
+
+
+  int32_t data[2] = { newPositionX, newPositionY }; 
+
+  // Serial.printf("Broadcasting integers: %ld, %ld\n", newPositionX, newPositionY);
+
+  // broadcast_peer.send_message(reinterpret_cast<const uint8_t *>(data), sizeof(data));
+  if (!broadcast_peer.send_message(reinterpret_cast<const uint8_t *>(data), sizeof(data))) {
+    Serial.println("Failed to broadcast message");
+  }
+
+  delay(10);
+
+}
