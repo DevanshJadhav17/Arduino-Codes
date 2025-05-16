@@ -1,0 +1,90 @@
+#include "ESP32_NOW.h"
+#include "WiFi.h"
+#include <esp_mac.h>
+#include <vector>
+
+#define ESPNOW_WIFI_CHANNEL 6
+
+class ESP_NOW_Peer_Class : public ESP_NOW_Peer {
+public:
+  ESP_NOW_Peer_Class(const uint8_t *mac_addr, uint8_t channel, wifi_interface_t iface, const uint8_t *lmk)
+    : ESP_NOW_Peer(mac_addr, channel, iface, lmk) {}
+
+  ~ESP_NOW_Peer_Class() {}
+
+  bool add_peer() {
+    if (!add()) {
+      log_e("Failed to register the broadcast peer");
+      return false;
+    }
+    return true;
+  }
+
+void onReceive(const uint8_t *data, size_t len, bool broadcast) {
+
+  if (len == 2 * sizeof(int32_t)) {
+    int32_t receivedValues[2];
+    memcpy(receivedValues, data, sizeof(receivedValues));
+
+    Serial.print("newPositionX: ");
+    Serial.print(receivedValues[0]);
+    Serial.print("  ");
+    Serial.print("newPositionY: ");
+    Serial.println(receivedValues[1]);
+
+  } else {
+    Serial.printf("  Invalid data size: %d bytes. Expected %d bytes for two int32_t values.\n", len, 2 * sizeof(int32_t));
+  }
+}
+
+};
+
+// List of all registered masters
+std::vector<ESP_NOW_Peer_Class> masters;
+
+// Callback to register new broadcasting peers
+void register_new_master(const esp_now_recv_info_t *info, const uint8_t *data, int len, void *arg) {
+  if (memcmp(info->des_addr, ESP_NOW.BROADCAST_ADDR, 6) == 0) {
+    Serial.printf("Unknown peer " MACSTR " sent a broadcast message\n", MAC2STR(info->src_addr));
+    Serial.println("Registering the peer as a master");
+
+    ESP_NOW_Peer_Class new_master(info->src_addr, ESPNOW_WIFI_CHANNEL, WIFI_IF_STA, NULL);
+    masters.push_back(new_master);
+
+    if (!masters.back().add_peer()) {
+      Serial.println("Failed to register the new master");
+      return;
+    }
+
+    // Manually invoke onReceive to process the first message
+    masters.back().onReceive(data, len, true);
+  } else {
+    log_v("Received a unicast message from " MACSTR, MAC2STR(info->src_addr));
+    log_v("Ignoring the message");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setChannel(ESPNOW_WIFI_CHANNEL);
+  while (!WiFi.STA.started()) {
+    delay(100);
+  }
+
+  if (!ESP_NOW.begin()) {
+    Serial.println("Failed to initialize ESP-NOW");
+    Serial.println("Rebooting in 5 seconds...");
+    delay(5000);
+    ESP.restart();
+  }
+
+  ESP_NOW.onNewPeer(register_new_master, NULL);
+
+  Serial.println("Setup complete. Waiting for a master to broadcast integer...");
+}
+
+void loop() {
+  delay(1000);
+}
